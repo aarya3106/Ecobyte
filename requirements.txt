@@ -1,0 +1,15 @@
+pandas
+numpy
+xgboost
+scikit-learn
+streamlit
+plotly
+folium
+streamlit-folium
+python-docx
+fpdf2
+requests
+python-dotenv
+meteostat
+google-generativeai
+sqlalchemy
