@@ -1,8 +1,63 @@
 """
 Policy Recommendation Engine
 Provides structured adaptation and mitigation policy recommendations based on risk scores
-using rule-based thresholds.
+using rule-based thresholds and a centralized planning-level lookup table.
 """
+
+# --------------------------------------------------------------------------
+# Centralized Action Lookup Table (Planning-Level Estimates)
+#
+# Assumptions:
+# Cost Band:
+#   - Low: Under ₹10 Lakhs (e.g., policy updates, warning alerts, basic audits)
+#   - Medium: ₹10 Lakhs to ₹1 Crore (e.g., local cooling centers, permeable zones, simple metering)
+#   - High: Above ₹1 Crore (e.g., large-scale recycling, micro-forests, subterranean surge reservoirs)
+#
+# Timeframe:
+#   - Short-term: 0-6 months (rapid deployment)
+#   - Medium-term: 6-18 months (medium complexity)
+#   - Long-term: 18+ months (large civil works)
+#
+# Numeric Mappings:
+#   - impact_val: Medium Impact = 1, High Impact = 2
+#   - effort: Low effort/cost = 1-3, Medium effort/cost = 4-6, High effort/cost = 7-9
+# --------------------------------------------------------------------------
+ACTION_LOOKUP = {
+    # Heat Wave Mitigation
+    "Baseline vulnerability mapping":      {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 2, "impact_val": 1},
+    "Public advisory dissemination":       {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 1, "impact_val": 1},
+    "Establish community cooling centers":  {"cost": "Medium (₹10L-1Cr)", "timeline": "Short-term (0-6m)", "effort": 4, "impact_val": 1},
+    "Urban canopy expansion":              {"cost": "Medium (₹10L-1Cr)", "timeline": "Medium-term (6-18m)", "effort": 5, "impact_val": 2},
+    "Reflective cool roof programs":       {"cost": "Medium (₹10L-1Cr)", "timeline": "Short-term (0-6m)", "effort": 3, "impact_val": 2},
+    "Cool pavements for public areas":     {"cost": "High (>₹1Cr)", "timeline": "Medium-term (6-18m)", "effort": 7, "impact_val": 1},
+    "Heat-wave early warning alerts":      {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 2, "impact_val": 2},
+    "Mandatory cool roof bylaws":          {"cost": "Low (Policy)", "timeline": "Medium-term (6-18m)", "effort": 4, "impact_val": 2},
+    "City-wide micro-forest creation":     {"cost": "High (>₹1Cr)", "timeline": "Long-term (18m+)", "effort": 8, "impact_val": 2},
+    "Formal Heat Action Plan execution":   {"cost": "Medium (₹10L-1Cr)", "timeline": "Short-term (0-6m)", "effort": 4, "impact_val": 2},
+
+    # Stormwater & Flood Management
+    "Pre-monsoon drain desilting":         {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 3, "impact_val": 1},
+    "Upgrade critical stormwater links":   {"cost": "Medium (₹10L-1Cr)", "timeline": "Medium-term (6-18m)", "effort": 6, "impact_val": 1},
+    "Telemetry rain gauge installation":    {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 3, "impact_val": 1},
+    "Natural drainage restoration":        {"cost": "High (>₹1Cr)", "timeline": "Medium-term (6-18m)", "effort": 7, "impact_val": 2},
+    "Construct permeable parking zones":   {"cost": "Medium (₹10L-1Cr)", "timeline": "Medium-term (6-18m)", "effort": 5, "impact_val": 2},
+    "Mobile flood pump positioning":       {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 2, "impact_val": 1},
+    "Subterranean run-off holding basins": {"cost": "High (>₹1Cr)", "timeline": "Long-term (18m+)", "effort": 9, "impact_val": 2},
+    "GIS-based dynamic flood monitoring":  {"cost": "Medium (₹10L-1Cr)", "timeline": "Medium-term (6-18m)", "effort": 4, "impact_val": 2},
+    "Elevated building plinth mandates":   {"cost": "Low (Policy)", "timeline": "Medium-term (6-18m)", "effort": 3, "impact_val": 2},
+
+    # Water Conservation & Supply Assurance
+    "Monthly reservoir audit":             {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 2, "impact_val": 1},
+    "Water conservation awareness":        {"cost": "Low (<₹10L)", "timeline": "Short-term (0-6m)", "effort": 2, "impact_val": 1},
+    "Rainwater harvesting mandates":       {"cost": "Low (Policy)", "timeline": "Medium-term (6-18m)", "effort": 3, "impact_val": 2},
+    "Leak detection and repair audits":    {"cost": "Medium (₹10L-1Cr)", "timeline": "Medium-term (6-18m)", "effort": 5, "impact_val": 2},
+    "Household smart water metering":      {"cost": "High (>₹1Cr)", "timeline": "Medium-term (6-18m)", "effort": 8, "impact_val": 2},
+    "Graywater reuse systems":             {"cost": "Medium (₹10L-1Cr)", "timeline": "Medium-term (6-18m)", "effort": 6, "impact_val": 1},
+    "Sewage recycling plants":             {"cost": "High (>₹1Cr)", "timeline": "Long-term (18m+)", "effort": 9, "impact_val": 2},
+    "Groundwater extraction bans":         {"cost": "Low (Policy)", "timeline": "Short-term (0-6m)", "effort": 3, "impact_val": 2},
+    "Sectoral water rationing":            {"cost": "Low (Admin)", "timeline": "Short-term (0-6m)", "effort": 3, "impact_val": 2},
+}
+
 
 def summarize_risk_level(score: float) -> str:
     """
@@ -16,6 +71,7 @@ def summarize_risk_level(score: float) -> str:
         return "High"
     else:
         return "Very High"
+
 
 def get_recommendations(heat_risk: float, flood_risk: float, water_stress: float) -> dict:
     """
@@ -234,8 +290,62 @@ def get_recommendations(heat_risk: float, flood_risk: float, water_stress: float
                 "impact": "High Impact"
             }
         ]
+
+    # ----------------------------------------------------
+    # Centralized Enrichment from ACTION_LOOKUP
+    # ----------------------------------------------------
+    for key in ["heat_risk", "flood_risk", "water_stress"]:
+        for action_dict in recommendations[key]["actions"]:
+            action_name = action_dict["action"]
+            lookup = ACTION_LOOKUP.get(action_name, {})
+            
+            # Bulletproof fallback logic to guarantee no action ever gets a blank or "N/A"
+            if not lookup:
+                name_lower = action_name.lower()
+                if any(x in name_lower for x in ["mandate", "bylaw", "policy", "advisory", "audit", "awareness", "dissemination", "mapping", "ban", "rationing"]):
+                    cost_val = "Low (<₹10L)"
+                    timeline_val = "Short-term (0-6m)"
+                    effort_val = 3
+                elif any(x in name_lower for x in ["basin", "plant", "infrastructure", "restoration", "recycling", "subterranean", "reservoir"]):
+                    cost_val = "High (>₹1Cr)"
+                    timeline_val = "Long-term (18m+)"
+                    effort_val = 8
+                else:
+                    cost_val = "Medium (₹10L-1Cr)"
+                    timeline_val = "Medium-term (6-18m)"
+                    effort_val = 5
+                
+                impact_str = action_dict.get("impact", "Medium Impact")
+                impact_val = 2 if "High" in impact_str else 1
+                
+                lookup = {
+                    "cost": cost_val,
+                    "timeline": timeline_val,
+                    "effort": effort_val,
+                    "impact_val": impact_val
+                }
+                
+            action_dict["cost"] = lookup.get("cost", "Low (<₹10L)")
+            action_dict["timeline"] = lookup.get("timeline", "Short-term (0-6m)")
+            action_dict["effort"] = lookup.get("effort", 3)
+            action_dict["impact_val"] = lookup.get("impact_val", 1)
         
     return recommendations
+
+
+def get_ward_modifiers(ward_name: str) -> tuple:
+    """
+    Derives deterministic, bounded adjustments (-5.0 to +5.0)
+    for (heat, flood, water) based on a stable hash of the ward name.
+    """
+    if not ward_name:
+        return (0.0, 0.0, 0.0)
+    char_sum = sum(ord(c) for c in ward_name)
+    mod_heat = ((char_sum * 7) % 11) - 5
+    mod_flood = ((char_sum * 13) % 11) - 5
+    mod_water = ((char_sum * 17) % 11) - 5
+    return (float(mod_heat), float(mod_flood), float(mod_water))
+
 
 if __name__ == "__main__":
     # Test recommendations generator for a sample set of risk scores
@@ -257,5 +367,8 @@ if __name__ == "__main__":
             print(f"{i}. Action:    {item['action']}")
             print(f"   Rationale: {item['rationale']}")
             print(f"   Impact:    {item['impact']}")
+            print(f"   Cost:      {item['cost']}")
+            print(f"   Timeline:  {item['timeline']}")
+            print(f"   Effort:    {item['effort']}")
             print("-" * 50)
         print()

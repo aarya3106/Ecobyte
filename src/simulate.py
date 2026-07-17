@@ -1,7 +1,8 @@
 """
 Scenario Simulation Module
 Simulates climate and socioeconomic scenario adjustments on city snapshots.
-Calculates the adjusted risk scores by running the trained XGBoost models.
+Calculates adjusted risk scores using the IMD-calibrated prediction engine
+(no XGBoost dependency — works without pre-trained model files).
 """
 
 import os
@@ -17,8 +18,12 @@ if project_root not in sys.path:
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-import db
-from models.model_utils import load_model, predict_risk
+try:
+    import src.db as db
+    from src.prediction_engine import predict_all_risks
+except ImportError:
+    import db
+    from prediction_engine import predict_all_risks
 
 def apply_adjustments(baseline_row: dict, adjustments: dict) -> dict:
     """
@@ -103,7 +108,7 @@ def apply_adjustments(baseline_row: dict, adjustments: dict) -> dict:
     city_areas = {"Mumbai": 603.4, "Pune": 331.3, "Nagpur": 227.6}
     sim_row["population_density"] = sim_row["population"] / city_areas.get(sim_row["city"], 300.0)
     
-    # Water demand-supply ratio
+    # Water demand-supply ratio (Standard 150L/person/day matching feature_engineering.py)
     sim_row["water_demand_supply_ratio"] = (sim_row["population"] * 0.00015) / sim_row["water_availability_mld"]
     
     return sim_row
@@ -112,7 +117,7 @@ def simulate_scenario(city: str, adjustments: dict) -> dict:
     """
     Simulates a scenario for a given city with adjustments.
     Loads baseline snapshot from the digital twin store, retrieves its complete engineered 
-    features from the features dataset, applies changes, and runs XGBoost models.
+    features from the features dataset, applies changes, and runs the prediction engine.
     
     Returns a dict containing baseline scores, simulated scores, and deltas.
     """
@@ -127,38 +132,71 @@ def simulate_scenario(city: str, adjustments: dict) -> dict:
         raise FileNotFoundError(f"Engineered features CSV not found at {features_csv}. Run feature engineering first.")
         
     df_feat = pd.read_csv(features_csv)
-    # Find matching row
-    match = df_feat[
-        (df_feat["city"] == baseline_raw["city"]) & 
-        (df_feat["year"] == baseline_raw["year"]) & 
-        (df_feat["month"] == baseline_raw["month"])
-    ]
-    if match.empty:
-        # Fallback: get the latest row for this city
-        match = df_feat[df_feat["city"] == baseline_raw["city"]].sort_values(by=["year", "month"]).tail(1)
-        
+    # Find matching row for the current city
+    match = df_feat[df_feat["city"] == city].sort_values(by=["year", "month"]).tail(1)
     if match.empty:
         raise ValueError(f"No matching feature record found in {features_csv} for {city}.")
         
     baseline_feat_row = match.iloc[0].to_dict()
     
+    # Scale rolling averages in proportion to the raw baseline difference
+    if match.iloc[0]["avg_temp"] != 0:
+        temp_diff = baseline_raw["avg_temp"] - match.iloc[0]["avg_temp"]
+        baseline_feat_row["avg_temp_roll_3m"] += temp_diff
+        baseline_feat_row["max_temp_roll_3m"] += temp_diff
+        baseline_feat_row["min_temp_roll_3m"] += temp_diff
+        
+    if match.iloc[0]["precipitation"] > 0:
+        precip_ratio = baseline_raw["precipitation"] / match.iloc[0]["precipitation"]
+        baseline_feat_row["precipitation_roll_3m"] *= precip_ratio
+        
+    if match.iloc[0]["humidity"] > 0:
+        humid_ratio = baseline_raw["humidity"] / match.iloc[0]["humidity"]
+        baseline_feat_row["humidity_roll_3m"] = min(100.0, max(0.0, baseline_feat_row["humidity_roll_3m"] * humid_ratio))
+
+    # Overwrite baseline raw metrics with active values from SQLite twin
+    baseline_feat_row["avg_temp"] = baseline_raw["avg_temp"]
+    baseline_feat_row["max_temp"] = baseline_raw["max_temp"]
+    baseline_feat_row["min_temp"] = baseline_raw["min_temp"]
+    baseline_feat_row["precipitation"] = baseline_raw["precipitation"]
+    baseline_feat_row["humidity"] = baseline_raw["humidity"]
+    baseline_feat_row["population"] = baseline_raw["population"]
+    baseline_feat_row["water_availability_mld"] = baseline_raw["water_availability_mld"]
+    
+    # Re-derive baseline engineered features based on overwritten active values
+    city_areas = {"Mumbai": 603.4, "Pune": 331.3, "Nagpur": 227.6}
+    
+    def estimate_hot_days(max_temp):
+        if max_temp <= 32.0:
+            return 0
+        elif max_temp >= 40.0:
+            return 30
+        else:
+            return int((max_temp - 32) * (30 / 8))
+            
+    baseline_feat_row["hot_days_count"] = estimate_hot_days(baseline_feat_row["max_temp"])
+    baseline_feat_row["heavy_rain_days_count"] = min(30, int(baseline_feat_row["precipitation"] / 80)) if baseline_feat_row["precipitation"] > 50 else 0
+    baseline_feat_row["population_density"] = baseline_feat_row["population"] / city_areas.get(city, 300.0)
+    baseline_feat_row["water_demand_supply_ratio"] = (baseline_feat_row["population"] * 0.00015) / baseline_feat_row["water_availability_mld"]
+    
+    # Print the baseline feature row used per city right before simulation to stderr for verification
+    import sys
+    print(f"[SCENARIO AUDIT] {city} baseline: Temp={baseline_feat_row['avg_temp']:.1f}°C, Precip={baseline_feat_row['precipitation']:.1f}mm, Humid={baseline_feat_row['humidity']:.1f}%, Pop={baseline_feat_row['population']:,}, Water={baseline_feat_row['water_availability_mld']:.1f}MLD", file=sys.stderr)
+    
     # 3. Build the simulated feature row by applying adjustments
     simulated = apply_adjustments(baseline_feat_row, adjustments)
     
-    # 4. Load trained risk models
-    heat_model = load_model("heat")
-    flood_model = load_model("flood")
-    water_model = load_model("water")
-    
-    # 5. Predict risk scores on the simulated row
-    heat_sim = predict_risk(heat_model, simulated)
-    flood_sim = predict_risk(flood_model, simulated)
-    water_sim = predict_risk(water_model, simulated)
-    
-    # Baseline risk scores are stored in the digital twin record
-    heat_base = baseline_raw["heat_risk_score"]
-    flood_base = baseline_raw["flood_risk_score"]
-    water_base = baseline_raw["water_stress_score"]
+    # 4. Run IMD-calibrated prediction engine on the simulated row
+    scores_sim  = predict_all_risks(simulated)
+    heat_sim    = scores_sim["heat_risk"]
+    flood_sim   = scores_sim["flood_risk"]
+    water_sim   = scores_sim["water_stress"]
+
+    # Baseline scores from the prediction engine too (consistent)
+    scores_base = predict_all_risks(baseline_feat_row)
+    heat_base   = scores_base["heat_risk"]
+    flood_base  = scores_base["flood_risk"]
+    water_base  = scores_base["water_stress"]
     
     # 6. Compile and return results
     return {
